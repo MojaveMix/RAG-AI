@@ -90,13 +90,19 @@ def chat():
         )
 
     # Drop ids that no longer exist so a stale UI selection cannot 500 later.
+    # An empty list or None means search across all documents.
     known = {row["id"] for row in get_doc_store().list_all()}
-    valid_ids = [doc_id for doc_id in (document_ids or []) if doc_id in known] if document_ids is not None else None
+    valid_ids = [doc_id for doc_id in document_ids if doc_id in known] if document_ids else None
+
+
+    mode = str(payload.get("mode") or "code").lower()
+    if mode not in {"code", "analysis"}:
+        mode = "code"
 
     def generate() -> Response:
         try:
             for event in answer_stream(
-                question, document_ids=valid_ids, history=history, model=model
+                question, document_ids=valid_ids, history=history, model=model, mode=mode
             ):
                 yield _sse(event["event"], event["data"])
         except OllamaError as exc:

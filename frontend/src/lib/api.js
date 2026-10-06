@@ -72,7 +72,7 @@ export function uploadDocument(file, onProgress) {
  * `handlers` receives { onSources, onDelta, onError, onDone }.
  * Returns an abort function.
  */
-export function streamChat({ question, documentIds, history, model, handlers }) {
+export function streamChat({ question, documentIds, history, model, mode = 'code', handlers }) {
   const controller = new AbortController()
   let finished = false
   const finish = () => {
@@ -91,6 +91,7 @@ export function streamChat({ question, documentIds, history, model, handlers }) 
           document_ids: documentIds,
           history,
           model,
+          mode,
         }),
         signal: controller.signal,
       })

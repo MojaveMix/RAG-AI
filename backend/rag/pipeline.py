@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterator
 from typing import Any
 
 from config import Config
 from rag.chunking import build_chunks
-from rag.loader import parse_bytes
+from rag.loader import EXTENSION_TO_LANGUAGE, parse_bytes
 from rag.vectorstore import get_store
 from services.document_store import DocumentStore
 from services.ollama_client import get_client
@@ -102,6 +103,45 @@ def ingest(data: bytes, filename: str, stored_name: str, doc_store: DocumentStor
     return doc_store.get(doc_id) or {"id": doc_id, "filename": filename}
 
 
+_ARABIC_PATTERN = re.compile(
+    r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFC]"
+)
+
+_FRENCH_INDICATORS = {
+    "le", "la", "les", "un", "une", "des", "du", "de", "d", "en", "et", "est",
+    "sont", "dans", "pour", "avec", "sur", "ce", "cet", "cette", "ces", "qui",
+    "que", "quoi", "dont", "où", "quand", "comment", "pourquoi", "quel", "quelle",
+    "quels", "quelles", "résume", "résumer", "explique", "donne", "parle", "document",
+    "titre", "texte", "sujet", "contenu"
+}
+
+_ENGLISH_INDICATORS = {
+    "the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "for", "of",
+    "with", "to", "and", "or", "what", "where", "when", "why", "how", "which",
+    "who", "whom", "whose", "summarize", "summary", "tell", "explain", "describe",
+    "give", "list", "about", "this", "document", "these", "does", "did", "can"
+}
+
+
+def detect_language(text: str) -> str:
+    """Detect whether a query is Arabic, French, or English."""
+    if not text:
+        return "English"
+    if _ARABIC_PATTERN.search(text):
+        return "Arabic"
+    has_french_accents = bool(re.search(r"[éèêëàâçîïôûùœÉÈÊËÀÂÇÎÏÔÛÙ]", text))
+    words = set(re.findall(r"\b\w+\b", text.lower()))
+    fr_score = len(words & _FRENCH_INDICATORS) + (2 if has_french_accents else 0)
+    en_score = len(words & _ENGLISH_INDICATORS)
+    if fr_score > en_score:
+        return "French"
+    if en_score > fr_score:
+        return "English"
+    if has_french_accents:
+        return "French"
+    return "English"
+
+
 def retrieve(
     question: str,
     *,
@@ -109,14 +149,14 @@ def retrieve(
     top_k: int | None = None,
 ) -> list[dict[str, Any]]:
     """Embed the question and return the most similar chunks."""
-    if document_ids is not None and not document_ids:
-        return []
+    # An empty list or None means "search across all documents"
+    filter_ids = document_ids if document_ids else None
 
     embedding = get_client().embed_query(question)
     return get_store().query(
         embedding,
         n_results=top_k or Config.TOP_K,
-        document_ids=document_ids or None,
+        document_ids=filter_ids,
     )
 
 
@@ -139,8 +179,35 @@ def format_sources(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sources
 
 
-def build_prompt(question: str, hits: list[dict[str, Any]]) -> str:
+def build_prompt(question: str, hits: list[dict[str, Any]], mode: str = "code") -> str:
     """Render the numbered context block injected into the user message."""
+    if mode == "code":
+        blocks = []
+        for position, hit in enumerate(hits, start=1):
+            metadata = hit.get("metadata") or {}
+            location = metadata.get("filename", "source file")
+            ext = metadata.get("extension", "")
+            lang = EXTENSION_TO_LANGUAGE.get(ext, "")
+            text = (hit.get("text") or "").strip()
+            if lang:
+                blocks.append(f"[{position}] File: {location} (Language: {lang})\n```{lang}\n{text}\n```")
+            else:
+                blocks.append(f"[{position}] File: {location}\n{text}")
+
+        return (
+            "Codebase & Document context excerpts:\n\n"
+            + "\n\n".join(blocks)
+            + "\n\n---\n\n"
+            "CODEX & CLAUDE CODE INSTRUCTIONS:\n"
+            "1. Deeply analyze the context information, data, and code above.\n"
+            "2. SCHEMA & CODE GENERATION: If the user asks for SQL tables, queries, schemas, models, or code based on entities/data in the documents (such as regions, locations, tables, fields, numbers), SYNTHESIZE and GENERATE the full SQL/code solution using that data. NEVER refuse by saying the document lacks SQL queries—generate them from the extracted information!\n"
+            "3. Generate COMPLETE, production-ready, clean, and robust code. Do not omit code or use lazy '// TODO: implement' comments.\n"
+            "4. Format all code snippets in markdown fenced code blocks with the proper language tag (e.g. ```sql, ```python, ```typescript, ```bash, etc.).\n"
+            "5. Cite referenced files using [1], [2] when explaining where data or logic originates.\n"
+            "6. Provide concise technical rationale, error handling, edge cases, and run/test instructions."
+        )
+
+    # Mode: "analysis" (Document Q&A mode)
     blocks = []
     for position, hit in enumerate(hits, start=1):
         metadata = hit.get("metadata") or {}
@@ -150,12 +217,32 @@ def build_prompt(question: str, hits: list[dict[str, Any]]) -> str:
         text = (hit.get("text") or "").strip()
         blocks.append(f"[{position}] Source: {location}\n{text}")
 
+    lang = detect_language(question)
+    if lang == "Arabic":
+        lang_rule = (
+            "السؤال باللغة العربية. يجب أن تكون إجابتك بالكامل باللغة العربية فقط. "
+            "لا تستخدم أي لغة أخرى حتى وإن كانت المستندات بلغة أخرى."
+        )
+    elif lang == "French":
+        lang_rule = (
+            "La question est posée en français. Vous DEVEZ obligatoirement rédiger votre réponse "
+            "intégralement en français. Ne répondez pas en arabe ni en anglais, même si les extraits de documents sont en arabe ou en anglais."
+        )
+    else:
+        lang_rule = (
+            "The question is in English. You MUST write your entire response strictly in English. "
+            "Do NOT reply in Arabic, French, or any other language, even if the source document excerpts are in another language."
+        )
+
     return (
         "Context excerpts from the uploaded documents:\n\n"
         + "\n\n".join(blocks)
         + "\n\n---\n\n"
-        f"Question: {question}\n"
-        "Answer using only the context above, citing excerpts as [1], [2], etc."
+        f"Question: {question}\n\n"
+        f"CRITICAL INSTRUCTIONS:\n"
+        f"1. Answer using ONLY the context excerpts above, citing excerpts as [1], [2], etc.\n"
+        f"2. {lang_rule}\n"
+        f"3. If the context does not contain the answer, state that you could not find the information in the uploaded documents (in the same language as the question)."
     )
 
 
@@ -163,9 +250,11 @@ def build_messages(
     question: str,
     hits: list[dict[str, Any]],
     history: list[dict[str, str]] | None = None,
+    mode: str = "code",
 ) -> list[dict[str, str]]:
+    system_prompt = Config.CODE_SYSTEM_PROMPT if mode == "code" else Config.ANALYSIS_SYSTEM_PROMPT
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": Config.SYSTEM_PROMPT}
+        {"role": "system", "content": system_prompt}
     ]
 
     for turn in (history or [])[-Config.MAX_HISTORY_TURNS * 2 :]:
@@ -175,18 +264,39 @@ def build_messages(
             messages.append({"role": role, "content": content})
 
     if hits:
-        messages.append({"role": "user", "content": build_prompt(question, hits)})
+        messages.append({"role": "user", "content": build_prompt(question, hits, mode=mode)})
+    elif mode == "code":
+        # In Code mode, generate code directly like Codex / Claude Code without blocking on document uploads
+        messages.append({
+            "role": "user",
+            "content": (
+                f"{question}\n\n"
+                "(Note: No codebase files or documents were uploaded or selected. "
+                "Act as an autonomous coding assistant (Codex / Claude Code). Generate the full, "
+                "production-ready code, complete implementation, and provide instructions to run or test it.)"
+            )
+        })
     else:
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"{question}\n\n"
-                    "(No documents are currently uploaded. Let the user know they "
-                    "should upload a document first.)"
-                ),
-            }
-        )
+        lang = detect_language(question)
+        if lang == "Arabic":
+            no_docs_notice = (
+                f"{question}\n\n"
+                "(لم يتم العثور على مستندات مرفوعة أو معلومات ذات صلة. "
+                "أخبر المستخدم باللغة العربية حصراً بضرورة رفع مستند أولاً.)"
+            )
+        elif lang == "French":
+            no_docs_notice = (
+                f"{question}\n\n"
+                "(Aucun document pertinent n'est disponible. "
+                "Indiquez à l'utilisateur en français qu'il doit d'abord importer un document.)"
+            )
+        else:
+            no_docs_notice = (
+                f"{question}\n\n"
+                "(No documents are currently available or no relevant excerpts were found. "
+                "Tell the user in English that they should upload a document first.)"
+            )
+        messages.append({"role": "user", "content": no_docs_notice})
     return messages
 
 
@@ -196,12 +306,13 @@ def answer_stream(
     document_ids: list[str] | None = None,
     history: list[dict[str, str]] | None = None,
     model: str | None = None,
+    mode: str = "code",
 ) -> Iterator[dict[str, Any]]:
     """Yield SSE-ready events: sources, then token deltas, then ``done``."""
     hits = retrieve(question, document_ids=document_ids)
     yield {"event": "sources", "data": format_sources(hits)}
 
-    messages = build_messages(question, hits, history)
+    messages = build_messages(question, hits, history, mode=mode)
     try:
         for delta in get_client().chat_stream(messages, model=model):
             yield {"event": "delta", "data": delta}

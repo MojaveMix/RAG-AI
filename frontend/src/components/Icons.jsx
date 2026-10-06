@@ -74,3 +74,39 @@ export const DatabaseIcon = wrap(
     <path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" />
   </>,
 )
+
+export const CodeIcon = wrap(
+  <>
+    <polyline points="16 18 22 12 16 6" />
+    <polyline points="8 6 2 12 8 18" />
+  </>,
+)
+
+export const CopyIcon = wrap(
+  <>
+    <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+  </>,
+)
+
+export const TerminalIcon = wrap(
+  <>
+    <polyline points="4 17 10 11 4 5" />
+    <line x1="12" x2="20" y1="19" y2="19" />
+  </>,
+)
+
+export const ArchiveIcon = wrap(
+  <>
+    <polyline points="21 8 21 21 3 21 3 8" />
+    <rect x="1" y="3" width="22" height="5" />
+    <line x1="10" y1="12" x2="14" y2="12" />
+  </>,
+)
+
+export const BookOpenIcon = wrap(
+  <>
+    <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+    <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+  </>,
+)

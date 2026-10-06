@@ -1,4 +1,4 @@
-"""Recursive character text splitter.
+"""Recursive character text splitter with multilingual and Arabic support.
 
 Mirrors the behaviour of LangChain's ``RecursiveCharacterTextSplitter`` without
 pulling in the dependency: try to keep the largest natural separator that fits
@@ -7,10 +7,49 @@ inside the chunk budget, and recurse into smaller separators for the remainder.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
-DEFAULT_SEPARATORS = ["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""]
+# Separators ordered from largest logical block to smallest character split.
+# Supports Latin/English/French (. ! ? ; ,) and Arabic (؟ ؛ ،).
+DEFAULT_SEPARATORS = [
+    "\n\n",
+    "\n",
+    ". ",
+    "؟ ",
+    "? ",
+    "! ",
+    "؛ ",
+    "; ",
+    "، ",
+    ", ",
+    " ",
+    "",
+]
+
+# Latin ligatures (ﬁ, ﬂ...) and Arabic presentation forms are mapped to plain letters.
+_COMPAT_FORMS = re.compile("[\ufb00-\ufb06\ufb50-\ufdff\ufe70-\ufefc]+")
+# Invisible characters that carry no meaning.
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\ufeff\u200e\u200f\u00ad\u0640"), None)
+
+
+def clean_text(text: str) -> str:
+    """Language-neutral text cleanup applied before chunking and embedding.
+
+    - NFC normalisation (fixes decomposed accents in French PDFs).
+    - Ligatures / Arabic presentation forms folded to plain letters via NFKC.
+    - Removes zero-width marks, soft hyphens and Arabic tatweel (kashida).
+    """
+    if not text:
+        return ""
+    text = _COMPAT_FORMS.sub(lambda m: unicodedata.normalize("NFKC", m.group(0)), text)
+    text = unicodedata.normalize("NFC", text)
+    return text.translate(_INVISIBLE)
+
+
+clean_arabic_text = clean_text
 
 
 @dataclass
@@ -44,7 +83,7 @@ def split_text(
     if chunk_overlap >= chunk_size:
         raise ValueError("chunk_overlap must be smaller than chunk_size")
     separators = separators or DEFAULT_SEPARATORS
-    text = text.strip()
+    text = clean_text(text).strip()
     if not text:
         return []
     if len(text) <= chunk_size:

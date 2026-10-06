@@ -56,14 +56,26 @@ def upload_document():
         return jsonify({"error": "No file selected."}), 400
 
     original_name = file.filename
+    base_name = original_name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
     extension = ("." + original_name.rsplit(".", 1)[-1].lower()) if "." in original_name else ""
-    if extension not in Config.ALLOWED_EXTENSIONS:
+
+    data = file.read()
+    if not data:
+        return jsonify({"error": "The uploaded file is empty."}), 400
+
+    # Binary check helper
+    is_known_ext = extension in Config.ALLOWED_EXTENSIONS
+    is_known_file = base_name in getattr(Config, "ALLOWED_FILENAMES", set())
+    sample = data[:4096]
+    is_binary = b"\x00" in sample and not (data.startswith((b"\xff\xfe", b"\xfe\xff")))
+
+    if not is_known_ext and not is_known_file and is_binary:
         return (
             jsonify(
                 {
                     "error": (
-                        f"'{extension or original_name}' is not supported. "
-                        f"Allowed types: {', '.join(sorted(Config.ALLOWED_EXTENSIONS))}"
+                        f"'{original_name}' is a binary file and cannot be parsed as text or code. "
+                        "Please upload source code, scripts, documents, or ZIP archives."
                     )
                 }
             ),
@@ -78,10 +90,6 @@ def upload_document():
             jsonify({"error": f"Embedding model '{Config.EMBED_MODEL}' is missing. Run: ollama pull {Config.EMBED_MODEL}"}),
             503,
         )
-
-    data = file.read()
-    if not data:
-        return jsonify({"error": "The uploaded file is empty."}), 400
 
     # Prefix with a uuid so two uploads of the same filename never collide.
     safe_name = secure_filename(original_name) or f"upload{extension}"

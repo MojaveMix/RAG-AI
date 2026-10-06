@@ -50,7 +50,10 @@ export default function SourceList({ sources, title = 'Sources' }) {
                     </span>
                   )}
                 </div>
-                <p className="mt-1.5 line-clamp-4 text-[11px] leading-relaxed text-slate-500">
+                <p
+                  dir="auto"
+                  className="mt-1.5 line-clamp-4 text-[11px] leading-relaxed text-slate-500"
+                >
                   {source.excerpt}
                 </p>
               </li>

@@ -11,14 +11,17 @@ PDF loading strategy (in order):
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import platform
 import shutil
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from config import Config
+from rag.chunking import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -234,19 +237,215 @@ def _load_docx(data: bytes) -> ParsedDocument:
     return ParsedDocument(text=text)
 
 
-def _load_plain(data: bytes) -> ParsedDocument:
-    for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+def _decode_plain(data: bytes) -> str:
+    """Decode a text file in any language without guessing the wrong legacy codepage.
+
+    Legacy single-byte codepages (cp1252 for French, cp1256 for Arabic...) accept
+    almost any byte sequence, so they cannot simply be tried in a fixed order:
+
+    1. BOM / UTF-16 and strict UTF-8 cover every modern file.
+    2. Latin-script languages (French, Spanish, German...) only use a few accented
+       letters, so a low share of non-ASCII bytes means cp1252.
+    3. A file that is mostly non-ASCII is a non-Latin script (Arabic, Cyrillic,
+       Greek, CJK...), where statistical detection is reliable.
+    """
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    for encoding in ("utf-8-sig", "utf-8"):
         try:
-            text = data.decode(encoding)
-            break
+            return data.decode(encoding)
         except UnicodeDecodeError:
-            continue
-    else:
-        text = data.decode("utf-8", errors="replace")
+            pass
+
+    non_ascii_ratio = sum(byte >= 0x80 for byte in data) / max(len(data), 1)
+    if non_ascii_ratio >= 0.2:
+        try:
+            from charset_normalizer import from_bytes
+
+            best = from_bytes(data).best()
+            if best is not None:
+                return str(best)
+        except Exception:  # noqa: BLE001 - detection is best-effort
+            logger.debug("charset detection failed", exc_info=True)
+
+    try:
+        return data.decode("cp1252")
+    except UnicodeDecodeError:
+        return data.decode("latin-1")
+
+
+EXTENSION_TO_LANGUAGE: dict[str, str] = {
+    ".py": "python",
+    ".pyw": "python",
+    ".ipynb": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".d.ts": "typescript",
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".sass": "sass",
+    ".less": "less",
+    ".json": "json",
+    ".jsonc": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".xml": "xml",
+    ".csv": "csv",
+    ".tsv": "tsv",
+    ".sql": "sql",
+    ".cql": "sql",
+    ".sh": "bash",
+    ".bash": "bash",
+    ".zsh": "bash",
+    ".ps1": "powershell",
+    ".bat": "batch",
+    ".cmd": "batch",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".hh": "cpp",
+    ".cs": "csharp",
+    ".java": "java",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".scala": "scala",
+    ".go": "go",
+    ".rs": "rust",
+    ".rb": "ruby",
+    ".php": "php",
+    ".swift": "swift",
+    ".r": "r",
+    ".dart": "dart",
+    ".lua": "lua",
+    ".vue": "vue",
+    ".svelte": "svelte",
+    ".astro": "astro",
+    ".dockerfile": "dockerfile",
+    ".containerfile": "dockerfile",
+    ".env": "properties",
+    ".ini": "ini",
+    ".cfg": "ini",
+    ".conf": "ini",
+    ".properties": "properties",
+    ".gradle": "groovy",
+    ".cmake": "cmake",
+    ".proto": "protobuf",
+    ".graphql": "graphql",
+    ".gql": "graphql",
+    ".prisma": "prisma",
+}
+
+
+def _load_plain(data: bytes) -> ParsedDocument:
+    text = _decode_plain(data)
 
     if not text.strip():
         raise EmptyDocument("This file is empty.")
     return ParsedDocument(text=text)
+
+
+def _load_ipynb(data: bytes) -> ParsedDocument:
+    """Parse Jupyter Notebook JSON into structured code and markdown blocks."""
+    raw = _decode_plain(data)
+    try:
+        nb = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise EmptyDocument(f"Could not parse Jupyter Notebook JSON: {exc}") from exc
+
+    cells = nb.get("cells") or []
+    sections: list[str] = []
+
+    for idx, cell in enumerate(cells, start=1):
+        cell_type = cell.get("cell_type", "code")
+        source = "".join(cell.get("source") or []).strip()
+        if not source:
+            continue
+        if cell_type == "markdown":
+            sections.append(f"### [Cell {idx} - Markdown]\n{source}")
+        else:
+            sections.append(f"### [Cell {idx} - Code (Python)]\n```python\n{source}\n```")
+
+    if not sections:
+        raise EmptyDocument("This notebook contains no code or markdown cells.")
+
+    return ParsedDocument(text="\n\n".join(sections))
+
+
+def _load_zip(data: bytes) -> ParsedDocument:
+    """Extract code and text files from a ZIP archive and combine them into a codebase manifest."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except Exception as exc:  # noqa: BLE001
+        raise EmptyDocument(f"Could not read ZIP archive: {exc}") from exc
+
+    ignored_dirs = (
+        "__pycache__", "node_modules", ".git/", ".venv/", ".idea/",
+        ".vscode/", "dist/", "build/", ".next/", "vendor/", "target/"
+    )
+    binary_exts = {
+        ".exe", ".dll", ".so", ".bin", ".iso", ".png", ".jpg", ".jpeg",
+        ".gif", ".ico", ".pdf", ".zip", ".tar", ".gz", ".pyc", ".class",
+        ".jar", ".war", ".ear", ".wasm", ".7z", ".rar"
+    }
+
+    file_sections: list[str] = []
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        rel_path = info.filename
+        if any(ign in rel_path for ign in ignored_dirs):
+            continue
+        ext = Path(rel_path).suffix.lower()
+        if ext in binary_exts:
+            continue
+
+        try:
+            raw_file = zf.read(info)
+            if not raw_file or (b"\x00" in raw_file[:4096] and not raw_file.startswith((b"\xff\xfe", b"\xfe\xff"))):
+                continue
+            content = _decode_plain(raw_file).strip()
+            if not content:
+                continue
+            lang = EXTENSION_TO_LANGUAGE.get(ext, "")
+            header = f"================================================================================\nFile: {rel_path}"
+            if lang:
+                file_sections.append(f"{header}\nLanguage: {lang}\n================================================================================\n```{lang}\n{content}\n```")
+            else:
+                file_sections.append(f"{header}\n================================================================================\n{content}")
+        except Exception:  # noqa: BLE001
+            continue
+
+    if not file_sections:
+        raise EmptyDocument("No readable text or code files found in this ZIP archive.")
+
+    return ParsedDocument(text="\n\n".join(file_sections))
+
+
+def _is_binary(data: bytes) -> bool:
+    """Check whether data appears to be binary by inspecting for null bytes."""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return False
+    sample = data[:4096]
+    return b"\x00" in sample
+
+
+def _load_code_or_text(data: bytes, filename: str) -> ParsedDocument:
+    """Load any code or text file, formatted with code language tagging."""
+    if _is_binary(data):
+        raise UnsupportedFileType(
+            f"'{filename}' appears to be a binary file. RAG AI processes code, scripts, text and documents."
+        )
+    return _load_plain(data)
 
 
 # ---------------------------------------------------------------------------
@@ -264,14 +463,32 @@ def parse_bytes(data: bytes, filename: str) -> ParsedDocument:
         raise EmptyDocument("This file is empty (0 bytes).")
 
     ext = Path(filename).suffix.lower()
-    if ext not in Config.ALLOWED_EXTENSIONS:
-        raise UnsupportedFileType(
-            f"Unsupported file type '{ext or 'unknown'}'. "
-            f"Allowed: {', '.join(sorted(Config.ALLOWED_EXTENSIONS))}"
-        )
+    base_name = Path(filename).name.lower()
+
+    # Determine if supported: known extension, recognized developer filename, or general plain text
+    is_known_ext = ext in Config.ALLOWED_EXTENSIONS
+    is_known_file = base_name in getattr(Config, "ALLOWED_FILENAMES", set())
+    
+    if not is_known_ext and not is_known_file:
+        if _is_binary(data):
+            raise UnsupportedFileType(
+                f"Unsupported file type '{ext or filename}'. "
+                f"Please upload code, text, documents or zip archives."
+            )
 
     if ext == ".pdf":
-        return _load_pdf(data)
-    if ext == ".docx":
-        return _load_docx(data)
-    return _load_plain(data)
+        doc = _load_pdf(data)
+    elif ext == ".docx":
+        doc = _load_docx(data)
+    elif ext == ".ipynb":
+        doc = _load_ipynb(data)
+    elif ext == ".zip":
+        doc = _load_zip(data)
+    else:
+        doc = _load_code_or_text(data, filename)
+
+    # Language-neutral cleanup: NFC accents, ligatures, zero-width marks, tatweel
+    doc.text = clean_text(doc.text)
+    if doc.page_texts:
+        doc.page_texts = [clean_text(pt) for pt in doc.page_texts]
+    return doc

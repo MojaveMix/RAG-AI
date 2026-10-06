@@ -5,11 +5,41 @@ import DocumentSidebar from './components/DocumentSidebar'
 import Message from './components/Message'
 import ModelPicker, { STORAGE_KEY, readStored } from './components/ModelPicker'
 import UploadZone from './components/UploadZone'
-import { AlertIcon, ChevronIcon, SparkIcon } from './components/Icons'
+import { AlertIcon, ChevronIcon, CodeIcon, SparkIcon } from './components/Icons'
 
 const MAX_HISTORY = 6
+const MODE_STORAGE_KEY = 'rag_ai_mode'
+const CODE_MODEL_STORAGE_KEY = 'rag_ai_code_model'
+const ANALYSIS_MODEL_STORAGE_KEY = 'rag_ai_analysis_model'
+
+function readStoredMode() {
+  try {
+    return localStorage.getItem(MODE_STORAGE_KEY) || 'code'
+  } catch {
+    return 'code'
+  }
+}
+
+function readStoredCodeModel() {
+  try {
+    return localStorage.getItem(CODE_MODEL_STORAGE_KEY) || 'qwen2.5-coder:7b'
+  } catch {
+    return 'qwen2.5-coder:7b'
+  }
+}
+
+function readStoredAnalysisModel() {
+  try {
+    return localStorage.getItem(ANALYSIS_MODEL_STORAGE_KEY) || 'Qwen3:8b'
+  } catch {
+    return 'Qwen3:8b'
+  }
+}
 
 export default function App() {
+  const [mode, setMode] = useState(readStoredMode)
+  const [codeModel, setCodeModel] = useState(readStoredCodeModel)
+  const [analysisModel, setAnalysisModel] = useState(readStoredAnalysisModel)
   const [documents, setDocuments] = useState([])
   const [selectedIds, setSelectedIds] = useState([])
   const [messages, setMessages] = useState([])
@@ -22,7 +52,26 @@ export default function App() {
   // null      = fetch completed but failed (Ollama down / backend unreachable)
   // object    = successfully loaded
   const [models, setModels] = useState(undefined)
-  const [model, setModel] = useState(readStored)
+
+  const activeModel = mode === 'code' ? codeModel : analysisModel
+
+  function handleModelChange(newModel) {
+    if (mode === 'code') {
+      setCodeModel(newModel)
+      try {
+        localStorage.setItem(CODE_MODEL_STORAGE_KEY, newModel)
+      } catch {
+        /* ignore */
+      }
+    } else {
+      setAnalysisModel(newModel)
+      try {
+        localStorage.setItem(ANALYSIS_MODEL_STORAGE_KEY, newModel)
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 
   const abortRef = useRef(null)
   const scrollRef = useRef(null)
@@ -59,29 +108,42 @@ export default function App() {
     }
   }, [])
 
-  // Keep the selection pointing at something installed: fall back to the
-  // backend's recommended default when the stored model is gone.
+  // Auto-sync installed models with dedicated code and analysis selections
   useEffect(() => {
     refreshModels().then((list) => {
       if (!list) return
       const installed = (list.chat || []).map((entry) => entry.name)
-      const current = installed.find((name) => name === model)
-      if (current) return
-      const fallback = installed.includes(model) ? model : list.default_chat
-      if (fallback) setModel(fallback)
+
+      // Sync Code Model: prefer dedicated coder model (e.g. qwen2.5-coder:7b)
+      if (!installed.includes(codeModel)) {
+        const fallbackCode = list.default_code_chat || list.default_chat
+        if (fallbackCode) {
+          setCodeModel(fallbackCode)
+          try { localStorage.setItem(CODE_MODEL_STORAGE_KEY, fallbackCode) } catch {}
+        }
+      } else if (list.default_code_chat && !codeModel.toLowerCase().includes('coder')) {
+        setCodeModel(list.default_code_chat)
+        try { localStorage.setItem(CODE_MODEL_STORAGE_KEY, list.default_code_chat) } catch {}
+      }
+
+      // Sync Analysis Model: prefer document Q&A model (e.g. Qwen3:8b)
+      if (!installed.includes(analysisModel)) {
+        const fallbackAnalysis = list.default_analysis_chat || list.default_chat
+        if (fallbackAnalysis) {
+          setAnalysisModel(fallbackAnalysis)
+          try { localStorage.setItem(ANALYSIS_MODEL_STORAGE_KEY, fallbackAnalysis) } catch {}
+        }
+      }
     })
-    // Runs once on mount; `model` is intentionally not a dependency.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshModels])
 
   useEffect(() => {
-    if (!model) return
     try {
-      localStorage.setItem(STORAGE_KEY, model)
+      localStorage.setItem(MODE_STORAGE_KEY, mode)
     } catch {
-      /* private browsing: the selection just will not persist */
+      /* ignore */
     }
-  }, [model])
+  }, [mode])
 
   useEffect(() => {
     refreshHealth()
@@ -168,10 +230,10 @@ export default function App() {
 
     abortRef.current = api.streamChat({
       question,
-      // Empty array means "search everything"; null would too, but be explicit.
       documentIds: selectedIds,
       history,
-      model,
+      model: activeModel,
+      mode,
       handlers: {
         onSources: (sources) => patch({ sources }),
         onDelta: (delta) =>
@@ -194,17 +256,27 @@ export default function App() {
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 text-white">
-            <SparkIcon className="h-4 w-4" />
+        <div className="flex items-center gap-2.5">
+          <div
+            className={`flex h-8 w-8 items-center justify-center rounded-lg text-white shadow-md transition-all ${
+              mode === 'code'
+                ? 'bg-gradient-to-br from-cyan-500 to-indigo-600 shadow-cyan-950/50'
+                : 'bg-gradient-to-br from-indigo-500 to-violet-600 shadow-indigo-950/50'
+            }`}
+          >
+            {mode === 'code' ? <CodeIcon className="h-4 w-4" /> : <SparkIcon className="h-4 w-4" />}
           </div>
           <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold text-slate-100">RAG AI</h1>
-            <p className="truncate text-[10px] text-slate-500">Powered by Ollama · local</p>
+            <h1 className="truncate text-sm font-semibold text-slate-100">
+              {mode === 'code' ? 'RAG Code AI' : 'RAG AI Analysis'}
+            </h1>
+            <p className="truncate text-[10px] text-slate-500">
+              {mode === 'code' ? 'Codex & Claude Code · local' : 'Document Intelligence · local'}
+            </p>
           </div>
         </div>
 
-        <UploadZone onUploaded={handleUploaded} />
+        <UploadZone onUploaded={handleUploaded} mode={mode} />
 
         <div className="min-h-0 flex-1">
           <DocumentSidebar
@@ -213,18 +285,19 @@ export default function App() {
             onToggle={toggleDocument}
             onSelectAll={selectAll}
             onDelete={handleDelete}
+            mode={mode}
           />
         </div>
 
         {models?.default_embed && (
-            <div className="border-t border-slate-800 pt-3 text-[10px] text-slate-500">
-              <div className="flex items-center justify-between">
-                <span>embed</span>
-                <span className="truncate pl-2 font-mono">{models.default_embed}</span>
-              </div>
+          <div className="border-t border-slate-800 pt-3 text-[10px] text-slate-500">
+            <div className="flex items-center justify-between">
+              <span>embed</span>
+              <span className="truncate pl-2 font-mono">{models.default_embed}</span>
             </div>
-          )}
-        </aside>
+          </div>
+        )}
+      </aside>
 
       {sidebarOpen && (
         <div
@@ -235,7 +308,7 @@ export default function App() {
 
       {/* ---- Chat ---- */}
       <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-3 border-b border-slate-800/80 px-4 py-3">
+        <header className="flex flex-wrap items-center gap-3 border-b border-slate-800/80 px-4 py-3">
           <button
             type="button"
             onClick={() => setSidebarOpen((value) => !value)}
@@ -244,38 +317,75 @@ export default function App() {
           >
             <ChevronIcon className="h-4 w-4" />
           </button>
-          <h2 className="min-w-0 flex-1 truncate text-sm font-medium text-slate-200">
-            {hasDocuments
-              ? selectedIds.length === 0
-                ? `Asking across all ${readyDocuments.length} documents`
-                : selectedIds.length === 1
-                  ? 'Asking 1 document'
-                  : `Asking ${selectedIds.length} documents`
-              : 'No documents loaded'}
-          </h2>
-          <ModelPicker
-            models={models}
-            value={model}
-            onChange={setModel}
-            disabled={busy}
-            ollamaDown={ollamaDown}
-            onRefresh={refreshModels}
-            embeddingModel={models?.default_embed || health?.ollama?.embed_model}
-            embeddingNote={
-              models?.default_embed && models?.default_embed !== health?.ollama?.embed_model
-                ? 'Catalog differs from .env; uploads still use the configured embed model.'
-                : null
-            }
-          />
-          {selectedIds.length > 0 && (
+
+          {/* Mode Switcher Segmented Control */}
+          <div className="flex items-center rounded-xl border border-slate-800 bg-slate-900/90 p-0.5 shadow-inner">
             <button
               type="button"
-              onClick={() => setSelectedIds([])}
-              className="shrink-0 rounded-lg bg-indigo-500/15 px-2.5 py-1 text-[11px] font-medium text-indigo-300 transition-colors hover:bg-indigo-500/25"
+              onClick={() => setMode('code')}
+              className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold transition-all ${
+                mode === 'code'
+                  ? 'border border-cyan-500/40 bg-gradient-to-r from-cyan-500/20 to-indigo-500/20 text-cyan-300 shadow-sm shadow-cyan-950/50'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
             >
-              Search all
+              <CodeIcon className="h-3.5 w-3.5" />
+              <span>RAG Code AI</span>
             </button>
-          )}
+            <button
+              type="button"
+              onClick={() => setMode('analysis')}
+              className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold transition-all ${
+                mode === 'analysis'
+                  ? 'border border-indigo-500/40 bg-gradient-to-r from-indigo-500/20 to-violet-500/20 text-indigo-300 shadow-sm shadow-indigo-950/50'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <SparkIcon className="h-3.5 w-3.5" />
+              <span>RAG AI Analysis</span>
+            </button>
+          </div>
+
+          <h2 className="hidden min-w-0 flex-1 truncate text-xs text-slate-400 sm:block">
+            {hasDocuments
+              ? selectedIds.length === 0
+                ? mode === 'code'
+                  ? `Repo context: all ${readyDocuments.length} files`
+                  : `Context: all ${readyDocuments.length} documents`
+                : selectedIds.length === 1
+                  ? 'Context: 1 selected file'
+                  : `Context: ${selectedIds.length} selected files`
+              : mode === 'code'
+                ? 'Codex & Claude Code generator'
+                : 'No documents loaded'}
+          </h2>
+
+          <div className="ml-auto flex items-center gap-2">
+            <ModelPicker
+              models={models}
+              value={activeModel}
+              onChange={handleModelChange}
+              disabled={busy}
+              ollamaDown={ollamaDown}
+              onRefresh={refreshModels}
+              embeddingModel={models?.default_embed || health?.ollama?.embed_model}
+              embeddingNote={
+                models?.default_embed && models?.default_embed !== health?.ollama?.embed_model
+                  ? 'Catalog differs from .env; uploads still use the configured embed model.'
+                  : null
+              }
+              mode={mode}
+            />
+            {selectedIds.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setSelectedIds([])}
+                className="shrink-0 rounded-lg bg-indigo-500/15 px-2.5 py-1 text-[11px] font-medium text-indigo-300 transition-colors hover:bg-indigo-500/25"
+              >
+                Search all
+              </button>
+            )}
+          </div>
         </header>
 
         {noChatModel && (
@@ -301,11 +411,11 @@ export default function App() {
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-3xl px-4 py-6">
             {messages.length === 0 ? (
-              <EmptyState hasDocuments={hasDocuments} onPick={setInput} />
+              <EmptyState hasDocuments={hasDocuments} onPick={setInput} mode={mode} />
             ) : (
               <div className="space-y-6">
                 {messages.map((message) => (
-                  <Message key={message.id} message={message} />
+                  <Message key={message.id} message={message} mode={mode} />
                 ))}
               </div>
             )}
@@ -334,49 +444,75 @@ export default function App() {
           onSubmit={handleSubmit}
           onStop={stop}
           busy={busy}
-          disabled={!hasDocuments || ollamaDown || noChatModel}
+          disabled={
+            mode === 'code'
+              ? ollamaDown || noChatModel
+              : !hasDocuments || ollamaDown || noChatModel
+          }
           hasDocuments={hasDocuments}
+          mode={mode}
         />
       </main>
     </div>
   )
 }
 
-function EmptyState({ hasDocuments, onPick }) {
-  const prompts = [
+function EmptyState({ hasDocuments, onPick, mode = 'code' }) {
+  const codePrompts = [
+    'Generate a FastAPI auth middleware with JWT tokens',
+    'Explain the architecture and data flow of this codebase',
+    'Find bugs, edge cases and write unit tests for this code',
+    'Refactor this code to improve performance and readability',
+  ]
+  const analysisPrompts = [
     'What is this document about?',
     'Give me a summary with the key points.',
     'List any dates, figures or names it mentions.',
   ]
+  const prompts = mode === 'code' ? codePrompts : analysisPrompts
 
   return (
     <div className="flex min-h-[50vh] flex-col items-center justify-center text-center">
-      <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-2xl shadow-indigo-950/60">
-        <SparkIcon className="h-7 w-7" />
+      <div
+        className={`flex h-14 w-14 items-center justify-center rounded-2xl text-white shadow-2xl ${
+          mode === 'code'
+            ? 'bg-gradient-to-br from-cyan-500 to-indigo-600 shadow-cyan-950/60'
+            : 'bg-gradient-to-br from-indigo-500 to-violet-600 shadow-indigo-950/60'
+        }`}
+      >
+        {mode === 'code' ? <CodeIcon className="h-7 w-7" /> : <SparkIcon className="h-7 w-7" />}
       </div>
       <h3 className="mt-5 text-lg font-semibold text-slate-100">
-        {hasDocuments ? 'Ask about your documents' : 'Upload a document to begin'}
+        {mode === 'code'
+          ? 'RAG Code AI · Codex & Claude Code'
+          : hasDocuments
+            ? 'Ask about your documents'
+            : 'Upload a document to begin'}
       </h3>
-      <p className="mt-1.5 max-w-sm text-sm text-slate-500">
-        {hasDocuments
-          ? 'Your files are indexed locally. Select specific ones in the sidebar, or ask across all of them.'
-          : 'Upload a PDF, DOCX, TXT or MD file. It is parsed, chunked and embedded locally with Ollama — nothing leaves your machine.'}
+      <p className="mt-1.5 max-w-md text-sm text-slate-400">
+        {mode === 'code'
+          ? hasDocuments
+            ? 'Your codebase is indexed locally. Ask to generate complete features, refactor components, or debug functions.'
+            : 'Generate production-ready code directly like Codex or Claude Code, or drop any source files / zip repos to query with repository context.'
+          : hasDocuments
+            ? 'Your files are indexed locally. Select specific ones in the sidebar, or ask across all of them.'
+            : 'Upload a PDF, DOCX, TXT or MD file. It is parsed, chunked and embedded locally with Ollama — nothing leaves your machine.'}
       </p>
 
-      {hasDocuments && (
-        <div className="mt-6 flex flex-wrap justify-center gap-2">
-          {prompts.map((prompt) => (
-            <button
-              key={prompt}
-              type="button"
-              onClick={() => onPick(prompt)}
-              className="rounded-full border border-slate-800 bg-slate-900/60 px-3 py-1.5 text-xs text-slate-400 transition-colors hover:border-slate-700 hover:text-slate-200"
-            >
-              {prompt}
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="mt-6 flex flex-wrap justify-center gap-2">
+        {prompts.map((prompt) => (
+          <button
+            key={prompt}
+            type="button"
+            onClick={() => onPick(prompt)}
+            className={`rounded-full border border-slate-800 bg-slate-900/60 px-3 py-1.5 text-xs text-slate-400 transition-colors hover:border-slate-700 ${
+              mode === 'code' ? 'hover:text-cyan-300' : 'hover:text-slate-200'
+            }`}
+          >
+            {prompt}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }

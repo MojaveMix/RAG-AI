@@ -1,10 +1,22 @@
 import { useRef, useState } from 'react'
 import { uploadDocument } from '../lib/api'
-import { AlertIcon, CheckIcon, FileIcon, UploadIcon } from './Icons'
+import { AlertIcon, ArchiveIcon, CheckIcon, CodeIcon, FileIcon, UploadIcon } from './Icons'
 
-const ACCEPT = '.pdf,.docx,.txt,.md,.markdown'
+const CODE_EXTS = new Set([
+  '.py', '.js', '.jsx', '.ts', '.tsx', '.html', '.css', '.scss',
+  '.json', '.yaml', '.yml', '.toml', '.xml', '.sql', '.sh', '.bash',
+  '.c', '.cpp', '.h', '.cs', '.java', '.kt', '.go', '.rs', '.rb',
+  '.php', '.swift', '.r', '.dart', '.lua', '.vue', '.svelte', '.ipynb'
+])
 
-export default function UploadZone({ onUploaded }) {
+function getFileIcon(filename) {
+  const ext = ('.' + (filename.split('.').pop() || '')).toLowerCase()
+  if (ext === '.zip') return <ArchiveIcon className="h-4 w-4 shrink-0 text-amber-400" />
+  if (CODE_EXTS.has(ext)) return <CodeIcon className="h-4 w-4 shrink-0 text-cyan-400" />
+  return <FileIcon className="h-4 w-4 shrink-0 text-slate-500" />
+}
+
+export default function UploadZone({ onUploaded, mode = 'code' }) {
   const inputRef = useRef(null)
   const [dragging, setDragging] = useState(false)
   const [queue, setQueue] = useState([])
@@ -69,21 +81,22 @@ export default function UploadZone({ onUploaded }) {
         }}
         className={`group cursor-pointer rounded-xl border border-dashed p-4 text-center transition-colors ${
           dragging
-            ? 'border-indigo-400 bg-indigo-500/10'
+            ? mode === 'code' ? 'border-cyan-400 bg-cyan-500/10' : 'border-indigo-400 bg-indigo-500/10'
             : 'border-slate-700 bg-slate-900/40 hover:border-slate-600 hover:bg-slate-900/70'
         } ${uploading ? 'pointer-events-none opacity-60' : ''}`}
       >
-        <UploadIcon className="mx-auto h-6 w-6 text-slate-500 transition-colors group-hover:text-indigo-400" />
+        <UploadIcon className={`mx-auto h-6 w-6 text-slate-500 transition-colors ${mode === 'code' ? 'group-hover:text-cyan-400' : 'group-hover:text-indigo-400'}`} />
         <p className="mt-2 text-sm text-slate-300">
-          Drop files here or <span className="text-indigo-400">browse</span>
+          Drop any file here or <span className={mode === 'code' ? 'text-cyan-400' : 'text-indigo-400'}>browse</span>
         </p>
-        <p className="mt-1 text-xs text-slate-500">PDF, DOCX, TXT or MD · up to 32 MB</p>
+        <p className="mt-1 text-[11px] text-slate-500">
+          {mode === 'code' ? 'Code (.py, .ts, .js, .go, .rs...), ZIP repos, Docs · up to 32 MB' : 'PDF, DOCX, TXT, MD or any file · up to 32 MB'}
+        </p>
 
         <input
           ref={inputRef}
           type="file"
           multiple
-          accept={ACCEPT}
           className="hidden"
           onChange={(event) => {
             handleFiles(event.target.files)
@@ -104,7 +117,7 @@ export default function UploadZone({ onUploaded }) {
           {queue.map((item) => (
             <li key={item.id} className="animate-in-up rounded-lg bg-slate-900/60 p-2.5">
               <div className="flex items-center gap-2">
-                <FileIcon className="h-4 w-4 shrink-0 text-slate-500" />
+                {getFileIcon(item.name)}
                 <span className="min-w-0 flex-1 truncate text-xs text-slate-300">{item.name}</span>
                 {item.status === 'done' ? (
                   <CheckIcon className="h-4 w-4 shrink-0 text-emerald-400" />

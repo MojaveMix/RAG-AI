@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { CheckIcon, ChevronIcon, SparkIcon } from './Icons'
+import { CheckIcon, ChevronIcon, CodeIcon, SparkIcon } from './Icons'
 
 const STORAGE_KEY = 'rag.chatModel'
 
@@ -47,11 +47,15 @@ function ModelRow({ model, selected, onSelect }) {
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
           <span className="truncate text-xs font-medium text-slate-200">{model.name}</span>
-          {model.recommended && (
+          {model.is_code ? (
+            <span className="shrink-0 rounded bg-cyan-500/20 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-cyan-300">
+              CODE
+            </span>
+          ) : model.recommended ? (
             <span className="shrink-0 rounded bg-emerald-500/20 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-emerald-300">
               RAG
             </span>
-          )}
+          ) : null}
         </span>
         {meta && (
           <span className="mt-0.5 block text-[10px] text-slate-500">
@@ -69,13 +73,13 @@ function ModelRow({ model, selected, onSelect }) {
   )
 }
 
-function SuggestionRow({ suggestion }) {
+function SuggestionRow({ suggestion, isCode }) {
   return (
     <div className="flex items-start gap-2.5 rounded-lg px-2.5 py-2">
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
           <span className="truncate text-xs font-medium text-slate-500">{suggestion.model}</span>
-          <span className="shrink-0 rounded bg-slate-800 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-slate-500">
+          <span className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${isCode ? 'bg-cyan-500/10 text-cyan-400' : 'bg-slate-800 text-slate-500'}`}>
             not installed
           </span>
         </span>
@@ -92,10 +96,6 @@ function SuggestionRow({ suggestion }) {
   )
 }
 
-// models prop has 3 possible values:
-//   undefined → initial fetch still in progress
-//   null      → fetch failed (Ollama/backend unreachable)
-//   object    → successfully loaded from /api/models
 export default function ModelPicker({
   models,
   value,
@@ -105,6 +105,7 @@ export default function ModelPicker({
   embeddingModel,
   embeddingNote,
   ollamaDown,
+  mode = 'code',
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
@@ -125,14 +126,25 @@ export default function ModelPicker({
     }
   }, [open])
 
-  const isLoading = models === undefined   // fetch in flight
-  const isFailed  = models === null        // fetch done but errored
-  const isLoaded  = models != null         // object with .chat etc.
+  const isLoading = models === undefined
+  const isFailed  = models === null
+  const isLoaded  = models != null
 
-  const chatModels  = isLoaded ? (models.chat || []) : []
-  const ragModels   = chatModels.filter((m) => m.recommended)
-  const selected    = chatModels.find((m) => m.name === value) || null
-  const suggestions = isLoaded ? (models.suggested_chat || []) : []
+  const chatModels = isLoaded ? (models.chat || []) : []
+  const selected = chatModels.find((m) => m.name === value) || null
+
+  const codeModels = chatModels.filter((m) => m.is_code)
+  const analysisModels = chatModels.filter((m) => !m.is_code)
+
+  // Primary list vs secondary list based on active mode
+  const primaryModels = mode === 'code' ? (codeModels.length > 0 ? codeModels : chatModels) : analysisModels
+  const secondaryModels = mode === 'code' ? (codeModels.length > 0 ? analysisModels : []) : codeModels
+
+  const suggestions = isLoaded
+    ? mode === 'code'
+      ? (models.suggested_code && models.suggested_code.length > 0 ? models.suggested_code : models.suggested_chat || [])
+      : (models.suggested_analysis && models.suggested_analysis.length > 0 ? models.suggested_analysis : models.suggested_chat || [])
+    : []
 
   // Label shown on the collapsed trigger button
   const triggerLabel = isLoading
@@ -143,24 +155,40 @@ export default function ModelPicker({
     ? selected.name
     : value || 'Select a model'
 
+  function handleTriggerClick() {
+    setOpen((prev) => {
+      const next = !prev
+      if (next) onRefresh?.()
+      return next
+    })
+  }
+
   return (
     <div className="relative" ref={ref}>
       {/* ── Trigger button ── */}
       <button
         type="button"
-        onClick={() => setOpen((s) => !s)}
+        onClick={handleTriggerClick}
         disabled={disabled}
         aria-expanded={open}
         aria-haspopup="listbox"
-        className="flex max-w-[15rem] items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/60 px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-slate-700 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
+        className="flex max-w-[16rem] items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/60 px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-slate-700 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        <SparkIcon className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+        {mode === 'code' ? (
+          <CodeIcon className="h-3.5 w-3.5 shrink-0 text-cyan-400" />
+        ) : (
+          <SparkIcon className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+        )}
         <span className="truncate">{triggerLabel}</span>
-        {selected?.recommended && (
+        {selected?.is_code ? (
+          <span className="shrink-0 rounded bg-cyan-500/20 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-cyan-300">
+            CODE
+          </span>
+        ) : selected?.recommended ? (
           <span className="shrink-0 rounded bg-emerald-500/20 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-emerald-300">
             RAG
           </span>
-        )}
+        ) : null}
         <ChevronIcon
           className={`h-3.5 w-3.5 shrink-0 text-slate-500 transition-transform ${open ? 'rotate-90' : ''}`}
         />
@@ -168,93 +196,114 @@ export default function ModelPicker({
 
       {/* ── Dropdown panel ── */}
       {open && (
-        <div className="animate-in-up absolute right-0 z-40 mt-1.5 w-[21rem] max-w-[calc(100vw-2rem)] rounded-xl border border-slate-800 bg-slate-900 p-1.5 shadow-2xl shadow-slate-950/80">
+        <div className="animate-in-up absolute right-0 z-40 mt-1.5 w-[22rem] max-w-[calc(100vw-2rem)] rounded-xl border border-slate-800 bg-slate-900 p-1.5 shadow-2xl shadow-slate-950/80">
           <div className="flex items-center justify-between px-2.5 pb-1 pt-1.5">
-            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-              Answer model
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+              {mode === 'code' ? 'Code Generation Model' : 'Document Analysis Model'}
             </p>
             <button
               type="button"
-              onClick={() => { onRefresh?.(); setOpen(false) }}
-              className="text-[10px] text-slate-500 transition-colors hover:text-indigo-300"
+              onClick={() => onRefresh?.()}
+              className="text-[10px] text-cyan-400 transition-colors hover:text-cyan-300 font-medium"
             >
-              Rescan
+              ↻ Rescan Ollama
             </button>
           </div>
 
           {/* ── State-driven body ── */}
           {isLoading ? (
-            /* Still waiting for the first response */
             <p className="px-2.5 py-3 text-[11px] leading-relaxed text-slate-500">
-              Connecting to backend…{' '}
-              <button
-                type="button"
-                onClick={() => { onRefresh?.(); setOpen(false) }}
-                className="text-indigo-400 underline hover:text-indigo-300"
-              >
-                retry
-              </button>
+              Connecting to Ollama…
             </p>
           ) : isFailed || ollamaDown ? (
-            /* Fetch completed but failed */
             <p className="px-2.5 py-3 text-[11px] leading-relaxed text-amber-400">
-              Cannot reach Ollama or the backend.{' '}
+              Cannot reach Ollama at localhost:11434.{' '}
               <span className="text-slate-400">
-                Start it with{' '}
-                <code className="font-mono text-slate-300">ollama serve</code>, then{' '}
+                Start with <code className="font-mono text-slate-300">ollama serve</code>, then{' '}
               </span>
               <button
                 type="button"
-                onClick={() => { onRefresh?.(); setOpen(false) }}
+                onClick={() => onRefresh?.()}
                 className="text-indigo-400 underline hover:text-indigo-300"
               >
                 rescan
               </button>
               .
             </p>
-          ) : ragModels.length === 0 ? (
-            /* Loaded but no RAG-suitable models installed */
+          ) : chatModels.length === 0 ? (
             <p className="px-2.5 py-3 text-[11px] leading-relaxed text-slate-500">
-              No RAG-optimised models found. Pull one with{' '}
-              <code className="font-mono text-slate-400">ollama pull qwen3:8b</code>.
+              No models found. Pull one with{' '}
+              <code className="font-mono text-slate-400">
+                ollama pull {mode === 'code' ? 'qwen2.5-coder:7b' : 'qwen3:8b'}
+              </code>.
             </p>
           ) : (
-            /* RAG-recommended models only */
-            <div className="max-h-80 overflow-y-auto">
-              <div className="space-y-0.5">
-                {ragModels.map((model) => (
-                  <ModelRow
-                    key={model.name}
-                    model={model}
-                    selected={model.name === value}
-                    onSelect={() => { onChange(model.name); setOpen(false) }}
+            <div className="max-h-80 overflow-y-auto space-y-2">
+              {/* Primary list */}
+              <div>
+                <p className="px-2.5 py-1 text-[10px] font-medium text-slate-500">
+                  {mode === 'code'
+                    ? codeModels.length > 0
+                      ? '⚡ Dedicated Coding Models'
+                      : '⚡ Recommended Models for Code'
+                    : '📄 Document & Analysis Models'}
+                </p>
+                <div className="space-y-0.5">
+                  {primaryModels.map((m) => (
+                    <ModelRow
+                      key={m.name}
+                      model={m}
+                      selected={m.name === value}
+                      onSelect={() => { onChange(m.name); setOpen(false) }}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* Secondary list */}
+              {secondaryModels.length > 0 && (
+                <div className="border-t border-slate-800/80 pt-1.5">
+                  <p className="px-2.5 py-1 text-[10px] font-medium text-slate-500">
+                    {mode === 'code' ? '📄 General & Document Models' : '⚡ Dedicated Code Models'}
+                  </p>
+                  <div className="space-y-0.5">
+                    {secondaryModels.map((m) => (
+                      <ModelRow
+                        key={m.name}
+                        model={m}
+                        selected={m.name === value}
+                        onSelect={() => { onChange(m.name); setOpen(false) }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Not-installed suggestions */}
+          {isLoaded && suggestions.length > 0 && (
+            <div className="border-t border-slate-800 pt-1.5">
+              <p className="px-2.5 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                {mode === 'code' ? 'Suggested Code Models' : 'Suggested Analysis Models'}
+              </p>
+              <div className="max-h-36 space-y-0.5 overflow-y-auto">
+                {suggestions.map((suggestion) => (
+                  <SuggestionRow
+                    key={suggestion.model}
+                    suggestion={suggestion}
+                    isCode={mode === 'code'}
                   />
                 ))}
               </div>
             </div>
           )}
 
-
-          {/* Not-installed suggestions */}
-          {isLoaded && suggestions.length > 0 && (
-            <>
-              <p className="border-t border-slate-800 px-2.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                Recommended, not installed
-              </p>
-              <div className="max-h-40 space-y-0.5 overflow-y-auto">
-                {suggestions.map((suggestion) => (
-                  <SuggestionRow key={suggestion.model} suggestion={suggestion} />
-                ))}
-              </div>
-            </>
-          )}
-
           {/* Embedding model footer */}
           {embeddingModel && (
             <p className="border-t border-slate-800 px-2.5 pb-1.5 pt-2 text-[10px] leading-relaxed text-slate-500">
-              Retrieval uses{' '}
-              <span className="font-medium text-slate-400">{embeddingModel}</span>
-              {embeddingNote ? ` — ${embeddingNote}` : '. Re-upload documents to change it.'}
+              Retrieval embedding: <span className="font-medium text-slate-400">{embeddingModel}</span>
+              {embeddingNote ? ` — ${embeddingNote}` : ''}
             </p>
           )}
         </div>
